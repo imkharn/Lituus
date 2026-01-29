@@ -1,5 +1,5 @@
 pragma solidity ^0.8.33;
-import {ERC20Burnable} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
+import {ERC20mb} from "./ERC20mb.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
@@ -195,11 +195,11 @@ contract Multiverse is ReentrancyGuard
 		uint forkQuery			= universe[_parent].forkQuery;
 		uint numberOfOutcomes	= universe[_parent].query[forkQuery].numberOfOutcomes;
 		//transfer an _amount of [_parent].repAddress from this contract to the burn address
-		ERC20Burnable(universe[_parent].repAddress).burn(_amount);
+		ERC20mb(universe[_parent].repAddress).burn(_amount);
 		//mint this same _amount in each fork and give it to this contract
 		for (uint i=0; i<numberOfOutcomes; i++)
 		{
-			ERC20Burnable(universe[_firstFork+i].repAddress).mint(address(this), _amount);
+			ERC20mb(universe[_firstFork+i].repAddress).mint(address(this), _amount);
 		}
 	}
 	
@@ -210,110 +210,109 @@ contract Multiverse is ReentrancyGuard
 		//	during initial migration all REP is required to migrate including REP staked on queries other than the subject of the fork
 		//	the only REP that splits instead of migrates is in Query Fees and staked on the fork query.
 		require(universe[_destination].repAddress != address(0), "Error: The destination universe must exist");
-		//import the ERC20 token of the _destination
-		IERC20 destination = IERC20(universe[_destination].repAddress);
-		//import the ERC20 token of the parent of the _destination
-		ERC20Burnable parent = ERC20Burnable(universe[universe[_destination].parent].repAddress);
-		require(parent.balanceOf(msg.sender) >= _amount, "Error: The amount parameter exceeds your balance of the destination's parent's REP token");
+		uint forkState = universe[universe[_destination].parent].forkState;	//sets forkState to the parent universe fork state.
 		//only forkState 2 is allowed. The other migration that happens in forkState 3 to 5 is built into the function to claim proceeds from the auction.
 		//	the forkState stays as 2 until someone calls bid() after 
-		require(parent.forkState == 2, "Error: Migration is only allowed when the parent of the destination is in fork state 2: initial migration");
+		require(forkState == 2, "Error: Migration is only allowed when the parent of the destination is in fork state 2: initial migration");
+		//import the ERC20 token of the _destination
+		ERC20mb destination = ERC20mb(universe[_destination].repAddress);
+		//import the ERC20 token of the parent of the _destination
+		ERC20mb parent 		= ERC20mb(universe[universe[_destination].parent].repAddress);
+		require(parent.balanceOf(msg.sender) >= _amount, "Error: The amount parameter exceeds your balance of the destination's parent's REP token");
 		//transfer an _amount of parent from message sender to burn address
 		parent.burnFrom(msg.sender, _amount);
 		//mint the same _amount of destination and give it to the message sender
 		destination.mint(msg.sender, _amount);
 	}
 	
-	function queryFee(uint _universe, uint _queryNearly3DaysAgo, uint _queryNearly60DaysAgo) public returns(uint queryFee)
-	{	//Returns the query fee, if it is time for the fee to change, it also calls changeQueryFee().
+	function _queryFee(uint _universe, uint _queryNearly3DaysAgo, uint _queryNearly60DaysAgo) public returns(uint queryFee)
+	{	//Returns the query fee, if it is time for the fee to change, it also calls change_queryFee().
 		//	To save gas, the client is required to look up the oldest query <3 days old, the oldest that is <60 days old, and instead the most recent if none exist
 		//require the universe exists by checking if it has a REP token
 		require(universe[_universe].repAddress != address(0), "Error: The provided universe does not exist");
 		//all txs are forwarded to the heir. Heir is self until fork, afterwards txs are forwarded to winners of the forking games.
 		uint u = universe[_universe].heir;
 		//shorter variables for readability
-		uint now				= block.timestamp;
-		uint threeDaysAgo 		= now - THREEDAYS;
-		uint thirtyDaysAgo		= now - THIRTYDAYS;
-		uint sixtyDaysAgo		= now - SIXTYDAYS;
+		uint currentTime		= block.timestamp;
 		uint nextQuery			= universe[u].nextQuery;
 		uint lastQuery			= nextQuery - 1;	//nextQuery starts at 1 in a new universe so this cant go negative.
 		uint timeOfLastQuery	= universe[u].query[lastQuery].createTime;
-		uint timeFeeLastChanged = universe[u].timeFeeLastChanged;
-		uint forkState 			= universe[u].forkState;
 		uint threeDayVolume;
 		uint sixtyDayVolume;
-		uint feeModifier;	//this number divided by TOKENS (10^18) is the modifier. e.g. 0.01*10^18 = The query fee is reduced to 1% of the baseFee.
 		uint queryFee;
 		uint volumeRatio;	//this number divided by TOKENS (10^18) is the ratio. e.g. 0.7 * 10^18 = 70% volume ratio
-		uint denominator;
 		//if the last query created has no create time, it means a fork happened and it needs to be imported.
 		if (timeOfLastQuery == 0)	importQuery(u,lastQuery);
-		if (threeDaysAgo > timeOfLastQuery)		//if no queries were created in the last 3 days
+		if (currentTime - THREEDAYS > timeOfLastQuery)		//if no queries were created in the last 3 days
 			_queryNearly3DaysAgo = lastQuery;	//set the nearly3DaysAgo query to the last query.
 		else									//otherwise verify the client provided the oldest query
 		{	//if there is no create time for the query created just before the alleged nearly 3 day old query, it means a fork happened and it needs to be imported.
 			if (universe[u].query[_queryNearly3DaysAgo-1].createTime == 0)	importQuery(u,_queryNearly3DaysAgo-1);
 			//require the client correctly identified the oldest by checking if one query earlier is less than 3 days old. 
-			require(threeDaysAgo > universe[u].query[_queryNearly3DaysAgo-1].createTime, "Error: The Query ID you provided is not the oldest in the last 3 days");
+			require(currentTime - THREEDAYS > universe[u].query[_queryNearly3DaysAgo-1].createTime, "Error: The Query ID you provided is not the oldest in the last 3 days");
 		}
-		if (sixtyDaysAgo > timeOfLastQuery)		//if no queries were created in the last 3 days
+		if (currentTime - SIXTYDAYS > timeOfLastQuery)		//if no queries were created in the last 3 days
 			_queryNearly60DaysAgo = lastQuery;	//set the nearly3DaysAgo query to the last query.
 		else									//otherwise verify the client provided the oldest query
 		{	//if there is no create time for the query created just before the alleged nearly 60 day old query, it means a fork happened and it needs to be imported.
 			if (universe[u].query[_queryNearly60DaysAgo-1].createTime == 0)	importQuery(u,_queryNearly60DaysAgo-1);
 			//require the client correctly identified the oldest by checking if one query earlier is less than 60 days old. 
-			require(sixtyDaysAgo > universe[u].query[_queryNearly60DaysAgo-1].createTime, "Error: The Query ID you provided is not the oldest in the last 60 days");
+			require(currentTime - SIXTYDAYS > universe[u].query[_queryNearly60DaysAgo-1].createTime, "Error: The Query ID you provided is not the oldest in the last 60 days");
 		}
 		//Update the Query Fee
-		if (thirtyDaysAgo > timeFeeLastChanged && universe[u].forkState == 0)
+		if (currentTime - THIRTYDAYS > universe[u].timeFeeLastChanged && universe[u].forkState == 0)
 		{	//if it has been longer than a month since the fee changed and not in a fork
 			changeQueryFee(u);
 		}
-
 		//these variables are set after the requires because the above code sometimes modifies _queryNearly3DaysAgo and _queryNearly60DaysAgo
 		threeDayVolume = nextQuery - _queryNearly3DaysAgo;	//these two volume counts are always greater than 0 because nextQuery has a larger ID number than any existing query.
 		sixtyDayVolume = nextQuery - _queryNearly60DaysAgo;	
 		//calculate the normalized ratio of the number of queries created in the last 3 days to the number created in the last 60 days. Scaled to 10^18 (TOKENS)
 		//when there is no volume in the last 3 days, the volume ratio will be 1 / sixtyDayVolume. When no volume in last 60 days it will be 1/1=1
 		volumeRatio = ((threeDayVolume * 20) * TOKENS) / sixtyDayVolume;
-		//Calculate the fee modifier
-		if (volumeRatio >= 1 * TOKENS)	//if the volume recently increased
-		{
-			//increase the fee by 20% of the increase
+
+		queryFee = (universe[u].baseFee * _feeModifier(volumeRatio)) / TOKENS;		
+		
+	}
+
+	function _feeModifier(uint volumeRatio) public returns(uint feeModifier)
+	{	//takes in the volume ratio (recent/historic query creation) and outputs the query fee modifier. Only used by _queryFee()
+		uint shortage;
+		uint powered;
+		uint denominator;
+		uint feeModifier; //this number divided by TOKENS (10^18) is the modifier. e.g. 0.01*10^18 = The query fee is reduced to 1% of the baseFee.
+		uint i;
+		
+		if (volumeRatio >= 1 * TOKENS)	
+		{	//if the volume recently increased, increase the fee by 20% of the increase
 			feeModifier = (4*TOKENS)/5 + volumeRatio/5;
 		}
 		else
-		{
-			//Apply a formula that decreases the fee slightly for up to ~25% drops, and dramatically thereafter.
+		{	//Apply a formula that decreases the fee slightly for up to ~25% drops, and dramatically thereafter.
 			//the original formula for when volumeRatio<1 is feeModifier = 1 / (1 + 100(1-volumeRatio)^6) , however this is not scaled to TOKENS and even when scaled causes overflow.
 			//to avoid this issue, the modifier is calculated iteratively
 			//Let shortage = 1-volumeRatio so that the formula is now:
 			//		feeModifier = 1 / (1 + 100(shortage)^6)
-			uint shortage = TOKENS - volumeRatio;	//the decline in volume is 1-(volumeRatio/10^18). Scaled to 10^18 (TOKENS) is: TOKENS - volumeRatio
-			
+			shortage = TOKENS - volumeRatio;	//the decline in volume is 1-(volumeRatio/10^18). Scaled to 10^18 (TOKENS) is: TOKENS - volumeRatio		
 			//Let powered = (shortage)^6 so that the formula is now:
 			//		feeModifier = 1 / (1 + 100*powered)
-			uint powered = TOKENS;	//powered starts at 1 scaled to 10^18
+			powered = TOKENS;	//powered starts at 1 scaled to 10^18
 			for (uint i = 0; i < 6; i++)
 			{
 				//powered is then repeatedly multiplied by shortage. As both are scaled to 10^18, it must be divided by TOKENS to keep the same scale.
 				powered = (powered * shortage) / TOKENS;	
 			}
-   
 			//Let denominator = 1 + 100*powered so that the formula is now:
 			//		feeModifier = 1 / denominator
 			denominator = TOKENS + (100 * powered);
 			//because the denominator is scaled up, instead of scaling it back down we scale up the numerator for better accuracy.
 			feeModifier = (TOKENS * TOKENS) / denominator;
 		}
-
-		queryFee = (universe[u].baseFee * feeModifier) / TOKENS;		
 		
 	}
 
 	function changeQueryFee(uint u) private
-	{	//Changes the Query Fee to increase profit. Only called by queryFee() when it is time for the fee to change
+	{	//Changes the Query Fee to increase profit. Only called by _queryFee() when it is time for the fee to change
 		//set shorter variables
 		bool baseFeeIncreased 			= universe[u].baseFeeIncreased;
 		uint[] memory threeDayRevenue	= universe[u].threeDayRevenue;    //an array of uint revenue buckets
@@ -321,7 +320,9 @@ contract Multiverse is ReentrancyGuard
 		uint baseFee 					= universe[u].baseFee;
 		uint totalProfit				= universe[u].totalProfit;
 		uint totalRevenue				= universe[u].totalRevenue;
+		uint timeFeeLastChanged 		= universe[u].timeFeeLastChanged;
 		uint current3day 				= _current3day();
+		uint currentTime				= block.timestamp;
 		uint thisMonthProfit;
 		uint thisMonthRevenue;
 		uint previousMonthRevenue;
@@ -368,17 +369,17 @@ contract Multiverse is ReentrancyGuard
 			if(baseFeeIncreased)	//if profit decreased after the fee was increased
 			{
 				baseFee = (baseFee * TOKENS) / BASE_FEE_RATE_OF_CHANGE;		//undo the increase
-				baseFeeIncreased = 0;
+				baseFeeIncreased = false;
 			}
 			else					//if profit decreased after the fee was decreased
 			{
 				baseFee = (baseFee * BASE_FEE_RATE_OF_CHANGE) / TOKENS;		//undo the decrease
-				baseFeeIncreased = 1;
+				baseFeeIncreased = true;
 				}
 		}	
 		//save the new state
 		universe[u].baseFeeIncreased 	= baseFeeIncreased;
-		universe[u].timeFeeLastChanged	= now;
+		universe[u].timeFeeLastChanged	= currentTime;
 		universe[u].baseFee 			= baseFee;
 	}
 
@@ -397,15 +398,19 @@ contract Multiverse is ReentrancyGuard
 	{	//Ask the oracle a question.
 		require(universe[_universe].repAddress != address(0), "Error: The universe you provided does not exist");
 		//all txs are forwarded to the heir. Heir is self until fork, afterwards txs are forwarded to winners of the forking games.
-		uint u 			= universe[_universe].heir;
-		uint thisQuery	= universe[u].nextQuery;	//the id this query will get is the next available query id.
-		uint current3day= _current3day();			//the time slot that revenue and profit data will be saved to
-		address buyer	= msg.sender;
-		require(!(0 < universe[u].forkState < 7), 	"Error: Forking universes do not allow Queries to be created"); //require NOT between 0 and 7
+		uint u 				= universe[_universe].heir;
+		//Set shorter variables
+		uint queryFee;
+		uint thisQuery		= universe[u].nextQuery;	//the id this query will get is the next available query id.
+		uint current3day	= _current3day();			//the time slot that revenue and profit data will be saved to
+		uint currentTime	= block.timestamp;
+		address buyer		= msg.sender;
+		
+		require(universe[u].forkState == 0 || universe[u].forkState == 7, "Error: Forking universes do not allow Queries to be created");
 		require(numberOfOutcomes > 2, 				"Error: The number of outcomes must be at least 3 to allow for a binary choice and invalid");
 		require(numberOfOutcomes <= MAX_OUTCOMES, 	"Error: The number of outcomes is more than this blockchain supports during forkUniverse()");
 		//import this universes REP token functions into rep.
-		IERC20 rep = IERC20(universe[u].repAddress);
+		ERC20mb rep = ERC20mb(universe[u].repAddress);
 		if (msg.sender == universe[u].queryTokenizer)
 		{	//if the contract that called this function is the Query Tokenizer contract
 			queryFee 	= optionalFee;	//the query tokenizer contract decides its own query fee
@@ -413,17 +418,18 @@ contract Multiverse is ReentrancyGuard
 		}
 		else//set the query fee normally
 		{
-			queryFee = queryFee(u, _queryNearly3DaysAgo, _queryNearly60DaysAgo);
+			queryFee = _queryFee(u, _queryNearly3DaysAgo, _queryNearly60DaysAgo);
 		}
 		require(rep.balanceOf(buyer) >= queryFee, 	"Error: You have do not have enough REP in that universe to cover the Query Fee");
 		//transfer the Query Fee from the buyer to this contract
 		rep.transferFrom(buyer, address(this), queryFee);		
 		//Save the Query	
 		universe[u].query.push();						//create storage space for a new query
-		universe[u].threeDayRevenue.length				= current3day + 1; //make sure threeDayRevenue has enough storage space 
+		//while the number of threeday revenue storage slots is less than or equal to the current slot data should be stored to, add an additional storage slot with push().
+		while(universe[u].threeDayRevenue.length<=current3day) universe[u].threeDayRevenue.push();
 		universe[u].query[thisQuery].fee				= queryFee;
 		universe[u].query[thisQuery].tipToken			= tipToken;
-		universe[u].query[thisQuery].createTime	 		= now;
+		universe[u].query[thisQuery].createTime	 		= currentTime;
 		universe[u].query[thisQuery].question			= question;
 		universe[u].query[thisQuery].numberOfOutcomes	= numberOfOutcomes;
 		universe[u].query[thisQuery].outcome			= UNRESOLVED;
@@ -472,10 +478,10 @@ contract Multiverse is ReentrancyGuard
 		require(universe[u].forkState 			!= 6, 			"Bug: This transaction should have been forwarded to heir");
 		require(universe[u].query[query].outcome== UNRESOLVED, 	"Error: Resolved queries can not be reported on");
 		//import this universes REP token as rep.
-		IERC20 rep 				= IERC20(universe[u].repAddress);
+		ERC20mb rep 			= ERC20mb(universe[u].repAddress);
 		//Create shorter variables for readability:
 		uint requiredStake;
-		uint now				= block.timestamp;
+		uint currentTime		= block.timestamp;
 		uint fee 				= universe[u].query[query].fee;
 		uint numberOfOutcomes	= universe[u].query[query].numberOfOutcomes;
 		uint lastReport			= universe[u].query[query].lastReport;
@@ -495,7 +501,7 @@ contract Multiverse is ReentrancyGuard
 			requiredStake = lastStake * 2;
 		}
 		//if the required stake is greater than half the forkBond the requiredStake becomes the forkBond
-		if (requiredStake >= 0.5 * forkBond)
+		if (requiredStake >= forkBond / 2)
 		{
 			requiredStake = forkBond;
 		}
@@ -511,12 +517,12 @@ contract Multiverse is ReentrancyGuard
 		universe[u].query[query].lastStake 				= lastStake;
 		universe[u].query[query].totalStake 			= totalStake;
 		universe[u].query[query].nextStake				= thisStake+1;
-		universe[u].query[query].timeOfLastReport		= now;
+		universe[u].query[query].timeOfLastReport		= currentTime;
 		universe[u].query[query].stake.push();			//create storage slot for this stake
 		universe[u].query[query].stake[thisStake].owner	= msg.sender;
 		universe[u].query[query].stake[thisStake].claim	= report;
 		universe[u].query[query].stake[thisStake].amount= requiredStake;
-		universe[u].query[query].stake[thisStake].time	= now;
+		universe[u].query[query].stake[thisStake].time	= currentTime;
 		//If this report triggered a fork 
 		if (requiredStake == forkBond)
 		{	//change into a forking state over this query.
@@ -543,7 +549,8 @@ contract Multiverse is ReentrancyGuard
 		
 		//Copy over the query data one value at a time:
 		//	stake[], nextStake,totalStake, lastStake, timeOfLastReport are all not copied over because a fork happened and all stakes were withdrawn or lost.
-		universe[u].query.length				= max(universe[u].query.length , universe[origin].query.length);	//ensure enough storage slots for queries exist
+		//while the number of query storage slots in this universe is less than the origin universe, create a new storage slot with push().
+		while(universe[u].query.length<universe[origin].query.length)	universe[u].query.push();
 		universe[u].query[q].createTime			= universe[origin].query[q].createTime;
 		universe[u].query[q].question			= universe[origin].query[q].question;
 		universe[u].query[q].numberOfOutcomes	= universe[origin].query[q].numberOfOutcomes;
@@ -568,9 +575,9 @@ contract Multiverse is ReentrancyGuard
 		uint supplyOfThisFork;
 		uint thisChild; 	
 		uint ancestor;			
-		uint now					= block.timestamp;
-		uint oneDayAgo	 			= now - ONEDAY;
-		uint threeDaysAgo			= now - 3 * ONEDAY;
+		uint currentTime			= block.timestamp;
+		uint oneDayAgo	 			= currentTime - ONEDAY;
+		uint threeDaysAgo			= currentTime - 3 * ONEDAY;
 		uint current3day			= _current3day();
 		uint forkState 				= universe[u].forkState;
 		uint forkQuery 				= universe[u].forkQuery;
@@ -585,7 +592,7 @@ contract Multiverse is ReentrancyGuard
 		uint lastReport				= universe[u].query[query].lastReport;
 		uint timeOfLastReport		= universe[u].query[query].timeOfLastReport;
 		uint nextStake				= universe[u].query[query].nextStake;
-		Stake[] memory stake		= universe[u].query[query].stake;	//import all staking data to stake[]
+		Stake[] storage stake 		= universe[u].query[query].stake;	//turn stake[] into an alias for universe[u].query[query].stake[] ;
 		
 		require(outcome==UNRESOLVED, 	"Error: This query is already resolved");
 		//if this query was created less than three days ago it requires a report before resolving. If longer than 3 days it will resolve invalid.
@@ -629,7 +636,7 @@ contract Multiverse is ReentrancyGuard
 				stake.push();	//create storage slot for a stake
 				stake[0].owner	= msg.sender;
 				stake[0].claim	= invalid;
-				stake[0].time	= now;
+				stake[0].time	= currentTime;
 				nextStake		= 1;
 				//lastReport is left unchanged so it can be used as an indicator that this query had no reporters.
 			}
@@ -667,7 +674,6 @@ contract Multiverse is ReentrancyGuard
 		universe[u].favoriteChild			= favoriteChild;
 		universe[u].totalFeeHoldings		= totalFeeHoldings;
 		universe[u].query[query].outcome	= outcome;
-		universe[u].query[query].stake		= stake;
 		universe[u].query[query].nextStake	= nextStake;	//this line could be removed if we are sure it will never be referenced again; it only changes during a NO_REPORT resolution.
 	}
 
@@ -681,7 +687,7 @@ contract Multiverse is ReentrancyGuard
 		uint portionCorrect;		// scaled to 10^18, 0.5 TOKENS = 50% of totalStake was staked on the correct outcome.
 		uint firstCorrect			= NOT_FOUND; //starts at 10^18 to simplify the for loop that searches for the first correct report
 		uint current3day 			= _current3day();
-		uint now					= block.timestamp;
+		uint currentTime			= block.timestamp;
 		uint totalProfit			= universe[u].totalProfit;
 		uint fee					= universe[u].query[query].fee;
 		uint nextStake				= universe[u].query[query].nextStake;
@@ -689,7 +695,7 @@ contract Multiverse is ReentrancyGuard
 		uint lastReport				= universe[u].query[query].lastReport;
 		uint createTime				= universe[u].query[query].createTime;
 		Stake[] memory stake		= universe[u].query[query].stake;	//import all staking data to stake[]
-		ERC20Burnable rep			= ERC20Burnable(universe[u].repAddress); 	//import REP's functions
+		ERC20mb rep					= ERC20mb(universe[u].repAddress); 	//import REP's functions
 		IERC20 tipToken				= IERC20(universe[u].query[query].tipToken);//import the tip token's functions
 		//Add up the total amount staked on the correct answer and save the first correct stake.
 		//	this loop is unbounded but the required stake is fee*2^nextStake < forkBond, so 20 loops starts to become implausible
@@ -703,12 +709,12 @@ contract Multiverse is ReentrancyGuard
 		//Calculate reporter pay. If reported the reporter is paid 0% at create time, and 100% of the query fee 3 days past create time
 		if (lastReport!=NO_REPORT) 	reporterPay = (fee * (stake[firstCorrect].time - createTime)) / THREEDAYS;
 		else					//If no reports, set the pay to 0% of the fee 3 days past create time, and 100% of the fee 6 days past create time
-									reporterPay = (fee * (now - (createTime + THREEDAYS))) / THREEDAYS; 
+									reporterPay = (fee * (currentTime - (createTime + THREEDAYS))) / THREEDAYS; 
 		if (reporterPay>fee) reporterPay=fee;	// the max pay is the entire query fee
 		//pay the first correct reporter the reporter pay
 		rep.transfer(stake[firstCorrect].owner, reporterPay);
 		//pay the first correct reporter the tip
-		tipToken.transfer	(stake[firstCorrect].owner, tip);
+		tipToken.transfer	(stake[firstCorrect].owner, universe[u].query[query].tip);
 		if (lastReport==NO_REPORT) 	portionCorrect = TOKENS;	//if no stakes, the portion correct is 100%.
 		else 						portionCorrect = (totalCorrect * TOKENS) / totalStake;	//scaled to 10^18 to allow decimals, wont div0 b/c lastReport!=NO_REPORT => (>0 totalStake)
 		//calculate the winnings for the escalation game; the amount winning stakes are multiplied by scaled to 10^18
@@ -758,7 +764,7 @@ contract Multiverse is ReentrancyGuard
 		uint totalStake	= universe[u].query[q].totalStake;
 		uint amount		= universe[u].query[q].stake[s].amount;
 		address owner	= universe[u].query[q].stake[s].owner;
-		IERC20 rep 		= IERC20(universe[u].repAddress);	//import this universes REP token as rep
+		ERC20mb rep 	= ERC20mb(universe[u].repAddress);	//import this universes REP token as rep
 		
 		require(owner == msg.sender, 					"Error: You do not own that stake");	//require they own the stake
 		if (forkState==0 || forkState==7)	//if normal operation or a forming universe, require the query is resolved.
@@ -778,7 +784,7 @@ contract Multiverse is ReentrancyGuard
 		//all txs are forwarded to the heir. Heir is self until fork, afterwards txs are forwarded to winners of the forking games.
 		uint u = universe[_universe].heir;
 		//Set shorter variables for readability
-		uint now						= block.timestamp;
+		uint currentTime				= block.timestamp;
 		uint forkQuery					= universe[u].forkQuery;
 		uint forkState					= universe[u].forkState;
 		uint numberOfOutcomes			= universe[u].query[forkQuery].numberOfOutcomes;
@@ -792,11 +798,11 @@ contract Multiverse is ReentrancyGuard
 		uint worstBid					= universe[u].auction[forkState].worstBid;
 		uint mintAmount					= universe[u].auction[forkState].mintAmount;
 		uint totalRepInBids				= universe[u].auction[forkState].totalRepInBids;
-		uint[] memory bid				= universe[u].auction[forkState].bid;//import all bid data to bid[]
+		Bid[] storage bid 				= universe[u].auction[forkState].bid; //turn bid[] into an alias (changes will impact state)
 		address repAddress				= universe[u].repAddress;		
-		IERC20 rep 						= IERC20(repAddress);				//import this universes REP token as rep.
+		ERC20mb rep 					= ERC20mb(repAddress);				//import this universes REP token as rep.
 		//define repFork[] as an array of ERC20 contracts with a size equal to the number of outcomes.
-		IERC20[] memory repFork 				= new IERC20[](numberOfOutcomes);
+		ERC20mb[] memory repFork 				= new ERC20mb[](numberOfOutcomes);
 		//define an array to track the amount migrated to each outcome within the current auction
 		uint[] memory migrationToOutcome 		= new uint[](numberOfOutcomes);	
 		//define an array to track the total amount migrated to an outcome. e.g. totalMigrationToOutcome[1] is the total REP migrated to outcome 1 of the forkQuery
@@ -811,14 +817,14 @@ contract Multiverse is ReentrancyGuard
 		uint favoriteChild;			
 		uint greatestMigration;
 		
-		require(forkState != 0,						"Error: This universe must be forking to advance the fork state");
-		require(forkState != 1,						"Error: This universe is awaiting children. First call forkUniverse() to create them");
-		if (forkState==2)require(now>state2endTime,	"Error: The initial migration has not ended yet");
-		if (forkState==3)require(now>state3endTime,	"Error: The first auction has not ended yet");
-		if (forkState==4)require(now>state4endTime,	"Error: The second auction has not ended yet");
-		if (forkState==5)require(now>state5endTime,	"Error: The third auction has not ended yet");
-		require(forkState != 6,						"Bug  : This universe has completed forking and this transaction should have been forwarded to its heir");
-		require(forkState != 7,						"Error: This universe is still forming. Its fork state will change to 0 once the parent universe resolves its fork query");
+		require(forkState != 0,								"Error: This universe must be forking to advance the fork state");
+		require(forkState != 1,								"Error: This universe is awaiting children. First call forkUniverse() to create them");
+		if (forkState==2)require(currentTime>state2endTime,	"Error: The initial migration has not ended yet");
+		if (forkState==3)require(currentTime>state3endTime,	"Error: The first auction has not ended yet");
+		if (forkState==4)require(currentTime>state4endTime,	"Error: The second auction has not ended yet");
+		if (forkState==5)require(currentTime>state5endTime,	"Error: The third auction has not ended yet");
+		require(forkState != 6,								"Bug  : This universe has completed forking and this transaction should have been forwarded to its heir");
+		require(forkState != 7,								"Error: This universe is still forming. Its fork state will change to 0 once the parent universe resolves its fork query");
 		
 		//Total the migration to each outcome so we can find the supply shortage and identify the favorite child.
 
@@ -829,7 +835,7 @@ contract Multiverse is ReentrancyGuard
 			//	and add the supply of that fork to the total migration to the respective outcome
 			//  and import the ERC20 functions of this fork of REP. For example repFork[numberOfOutcomes-1].totalSupply() is the supply of the 'invalid' fork.
 			thisOutcome								= thisFork-_firstFork;					//because the first fork is outcome 0 and they are created sequentially
-			repFork[thisOutcome]					= IERC20(universe[thisFork].repAddress);//import the functions of this fork's rep token  
+			repFork[thisOutcome]					= ERC20mb(universe[thisFork].repAddress);//import the functions of this fork's rep token  
 			supplyOfThisFork 						= repFork[thisOutcome].totalSupply();
 			totalMigrationToOutcome[thisOutcome]	= supplyOfThisFork;
 		}
@@ -887,18 +893,10 @@ contract Multiverse is ReentrancyGuard
 	{	//Place a bid to buy an amount of minted REP payable with ETH as well as declaring where in the order book the bid should be inserted and a destination universe to migrate to.
 		require(universe[destination].repAddress != address(0),	"Error: The universe you provided does not exist");
 		//Shorten variables:
-		uint now				= block.timestamp;
 		uint parent				= universe[destination].parent;
-		uint forkQuery			= universe[parent].forkQuery;
-		uint forkState			= universe[parent].forkState;
-		uint thisAuction		= forkState;									//the auction number is the same as the fork state the auction happens during.
-		uint forkStartTime 		= universe[parent].query[forkQuery].timeOfLastReport;
-		uint state3endTime		= forkStartTime + 21 * ONEDAY;					//forkState 3 and auction[3] end 21 days after the fork starts
-		uint state4endTime		= forkStartTime + 26 * ONEDAY;					//forkState 4 and auction[4] end 26 days after the fork starts
-		uint state5endTime		= forkStartTime + 28 * ONEDAY;					//forkState 5 and auction[5] end 28 days after the fork starts		
+		uint thisAuction		= universe[parent].forkState; //the auction number is the same as the fork state the auction happens during.
 		uint mintAmount			= universe[parent].auction[thisAuction].mintAmount;
-		uint nextBid			= universe[parent].auction[thisAuction].nextBid;
-		uint thisBid			= nextBid;										//this bid will be saved in the next available bid slot which is auction[thisAuction].nextBid
+		uint thisBid			= universe[parent].auction[thisAuction].nextBid;//this bid will be saved in the next available bid slot which is auction[thisAuction].nextBid								
 		uint bestBid			= universe[parent].auction[thisAuction].bestBid;
 		uint worstBid			= universe[parent].auction[thisAuction].worstBid;
 		Bid[] storage bid 		= universe[parent].auction[thisAuction].bid;	//turn bid[] into an alias for this longer variable name. (changes will impact state)
@@ -907,18 +905,12 @@ contract Multiverse is ReentrancyGuard
 		uint worsePrice;		//Scaled to 10*18 (TOKENS).
 		uint adjacentWorseBid;
 
-		//Require bidding is currently allowed. These requires also confirm a valid destination was given because the destination both exists and its parent is in the correct state.
-		require(forkState!=0, 							"Error: There is no auction. Auctions happen during a fork after initial migration");
-		require(forkState!=1, 							"Bug: It should not be possible for this destination universe to pass the earlier require(exists) while it's parent is in forkState 1: awaiting children");
-		require(forkState!=2, 							"Error: There is no auction. Wait until the initial migration period ends then call advanceForkState()");
-		if (forkState==3) require(now<state3endTime,	"Error: It is time for the current auction to end. Call advanceForkState() instead");
-		if (forkState==4) require(now<state4endTime,	"Error: It is time for the current auction to end. Call advanceForkState() instead");
-		if (forkState==5) require(now<state5endTime,	"Error: It is time for the current auction to end. Call advanceForkState() instead");
-		require(forkState<6,							"Error: The auctions have ended");
+		checkIfBiddingAllowed(parent);	//Runs the require statements that make sure bidding is allowed at this time. Spun off into separate function due to stack depth limit.
+
 		//Require the bid is for a valid amount of REP and ETH
-		require(msg.value>0,							"Error: You must send ETH with your transaction to make a bid");
-		require(repAmount<=mintAmount,					"Error: The amount you bid for is greater than the amount being sold in this auction");
-		require(repAmount> mintAmount/10000,			"Error: The minimum amount of REP you can bid for is 0.01% of the auction");
+		require(msg.value>0,									"Error: You must send ETH with your transaction to make a bid");
+		require(repAmount<=mintAmount,							"Error: The amount you bid for is greater than the amount being sold in this auction");
+		require(repAmount> mintAmount/10000,					"Error: The minimum amount of REP you can bid for is 0.01% of the auction");
 		
 		price = (msg.value * TOKENS) / repAmount;	//the ETH paid with this transaction divided by amount of REP demanded is the price. Scaled to 10*18 (TOKENS).
 		
@@ -946,7 +938,7 @@ contract Multiverse is ReentrancyGuard
 		}
 		else
 		{	//if the bidder is attempting to insert between two existing bids
-			require(adjacentBetterBid<nextBid,	"Error: The adjacent better bid you provided is not a valid bid ID");
+			require(adjacentBetterBid<thisBid,	"Error: The adjacent better bid you provided is not a valid bid ID");
 			betterPrice		= bid[adjacentBetterBid].ethAmount * TOKENS / bid[adjacentBetterBid].repAmount;	//Scaled to 10*18 (TOKENS).
 			adjacentWorseBid= bid[adjacentBetterBid].adjacentWorseBid;
 			worsePrice		= bid[adjacentWorseBid].ethAmount * TOKENS / bid[adjacentWorseBid].repAmount;	//Scaled to 10*18 (TOKENS).
@@ -971,6 +963,26 @@ contract Multiverse is ReentrancyGuard
 		universe[parent].auction[thisAuction].worstBid			= worstBid;				
 	}
 
+	function checkIfBiddingAllowed(uint u) private
+	{	//Checks if bidding is allowed currently. Only used by bid()									
+		uint currentTime		= block.timestamp;
+		uint forkState			= universe[u].forkState;
+		uint forkQuery			= universe[u].forkQuery;
+		uint forkStartTime 		= universe[u].query[forkQuery].timeOfLastReport;
+		uint state3endTime		= forkStartTime + 21 * ONEDAY;					//forkState 3 and auction[3] end 21 days after the fork starts
+		uint state4endTime		= forkStartTime + 26 * ONEDAY;					//forkState 4 and auction[4] end 26 days after the fork starts
+		uint state5endTime		= forkStartTime + 28 * ONEDAY;					//forkState 5 and auction[5] end 28 days after the fork starts		
+		//Require the universe is in the correct forking state for bidding.
+		require(forkState!=0, 									"Error: There is no auction. Auctions happen during a fork after initial migration");
+		require(forkState!=1, 									"Bug: It should not be possible for this destination universe to pass the earlier require(exists) while it's parent is in forkState 1: awaiting children");
+		require(forkState!=2, 									"Error: There is no auction. Wait until the initial migration period ends then call advanceForkState()");
+		if (forkState==3) require(currentTime<state3endTime,	"Error: It is time for the current auction to end. Call advanceForkState() instead");
+		if (forkState==4) require(currentTime<state4endTime,	"Error: It is time for the current auction to end. Call advanceForkState() instead");
+		if (forkState==5) require(currentTime<state5endTime,	"Error: It is time for the current auction to end. Call advanceForkState() instead");
+		require(forkState<6,									"Error: The auctions have ended");	
+	}
+
+
 	function collect(uint _universe) public
 	{	//Transfer REP won in the auction to your wallet
 		uint totalSurplus;			// The total quantity of ETH that would be returned to winning bidders if the auction settled using the lower VCG price
@@ -986,15 +998,15 @@ contract Multiverse is ReentrancyGuard
 
 	function createREP(uint _universe) private returns (address repAddress)
 	{	//Deploy a REP token for a _universe
-		// be sure to include "is ERC20, ERC20Burnable"
+		// be sure to include "is ERC20, ERC20mb"
+		//ERC20mb rep = new ERC20mb(address(this), "Reputation", "###put token ticker here");  // Multiverse is owner, set name/symbol
+		//repAddress = address(rep);
 	}
 
 
 
 /*
 		TODO
-ERC20Burnable does not support both mint and burn, nothing does. Need to assemble a custom openzeppelin library.
-Likely to get stack to deep errors on 3 functions forkUniverse() advanceForkState() bid(). Split into extra functions.
 Consider getting rid of nextQuery variable and instead using query.length
 Consider checking if universes exist using universe.length instead of erc20 exists.
 Find a way to skip auctions if >2/3 of original supply has migrated to a fork. Restoring supply at this point is only harmful.
@@ -1003,7 +1015,7 @@ Consider if advanceForkState() can be made to cover more forkstates, by forwardi
 Add memory to variables to reduce gas
 Add the contract that enables premature queries.
 Some for loops can be switched to while loops which is more fitting.
-Switch from burning by transferring to address 0 to rep.burn(amount) now that ERC20Burnable.sol is included. This will ensure totalSupply() is correct.
+Switch from burning by transferring to address 0 to rep.burn(amount) now that ERC20mb.sol is included. This will ensure totalSupply() is correct.
 upgrade all interactions with the arbitrary tip token to safeTransfer()
 add error for not doing approval tx. require(token.allowance(msg.sender, address(this)) >= amount, "Error: ###");
 universes are appended onto the end when creating new ones, its possible for two different universes to be in a fork at the same time, check if this causes any issues. 
