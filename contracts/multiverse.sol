@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0
 pragma solidity ^0.8.33;
 import {ERC20mb} from "./ERC20mb.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -212,7 +213,7 @@ contract Multiverse is ReentrancyGuard
 		require(universe[_destination].repAddress != address(0), "Error: The destination universe must exist");
 		uint forkState = universe[universe[_destination].parent].forkState;	//sets forkState to the parent universe fork state.
 		//only forkState 2 is allowed. The other migration that happens in forkState 3 to 5 is built into the function to claim proceeds from the auction.
-		//	the forkState stays as 2 until someone calls bid() after 
+		//	the forkState stays as 2 until someone calls createBid() after 
 		require(forkState == 2, "Error: Migration is only allowed when the parent of the destination is in fork state 2: initial migration");
 		//import the ERC20 token of the _destination
 		ERC20mb destination = ERC20mb(universe[_destination].repAddress);
@@ -239,7 +240,6 @@ contract Multiverse is ReentrancyGuard
 		uint timeOfLastQuery	= universe[u].query[lastQuery].createTime;
 		uint threeDayVolume;
 		uint sixtyDayVolume;
-		uint queryFee;
 		uint volumeRatio;	//this number divided by TOKENS (10^18) is the ratio. e.g. 0.7 * 10^18 = 70% volume ratio
 		//if the last query created has no create time, it means a fork happened and it needs to be imported.
 		if (timeOfLastQuery == 0)	importQuery(u,lastQuery);
@@ -275,12 +275,11 @@ contract Multiverse is ReentrancyGuard
 		
 	}
 
-	function _feeModifier(uint volumeRatio) public returns(uint feeModifier)
+	function _feeModifier(uint volumeRatio) public pure returns(uint feeModifier)
 	{	//takes in the volume ratio (recent/historic query creation) and outputs the query fee modifier. Only used by _queryFee()
 		uint shortage;
 		uint powered;
 		uint denominator;
-		uint feeModifier; //this number divided by TOKENS (10^18) is the modifier. e.g. 0.01*10^18 = The query fee is reduced to 1% of the baseFee.
 		uint i;
 		
 		if (volumeRatio >= 1 * TOKENS)	
@@ -297,7 +296,7 @@ contract Multiverse is ReentrancyGuard
 			//Let powered = (shortage)^6 so that the formula is now:
 			//		feeModifier = 1 / (1 + 100*powered)
 			powered = TOKENS;	//powered starts at 1 scaled to 10^18
-			for (uint i = 0; i < 6; i++)
+			for (i=0; i<6; i++)
 			{
 				//powered is then repeatedly multiplied by shortage. As both are scaled to 10^18, it must be divided by TOKENS to keep the same scale.
 				powered = (powered * shortage) / TOKENS;	
@@ -306,7 +305,7 @@ contract Multiverse is ReentrancyGuard
 			//		feeModifier = 1 / denominator
 			denominator = TOKENS + (100 * powered);
 			//because the denominator is scaled up, instead of scaling it back down we scale up the numerator for better accuracy.
-			feeModifier = (TOKENS * TOKENS) / denominator;
+			feeModifier = (TOKENS * TOKENS) / denominator; //this number divided by TOKENS (10^18) is the modifier. e.g. 0.01*10^18 = The query fee is reduced to 1% of the baseFee.
 		}
 		
 	}
@@ -316,11 +315,10 @@ contract Multiverse is ReentrancyGuard
 		//set shorter variables
 		bool baseFeeIncreased 			= universe[u].baseFeeIncreased;
 		uint[] memory threeDayRevenue	= universe[u].threeDayRevenue;    //an array of uint revenue buckets
-		uint[] memory threeDayProfit	= universe[u].threeDayRevenue;    //an array of uint revenue buckets
+		uint[] memory threeDayProfit	= universe[u].threeDayProfit;    //an array of uint revenue buckets
 		uint baseFee 					= universe[u].baseFee;
 		uint totalProfit				= universe[u].totalProfit;
 		uint totalRevenue				= universe[u].totalRevenue;
-		uint timeFeeLastChanged 		= universe[u].timeFeeLastChanged;
 		uint current3day 				= _current3day();
 		uint currentTime				= block.timestamp;
 		uint thisMonthProfit;
@@ -328,7 +326,6 @@ contract Multiverse is ReentrancyGuard
 		uint previousMonthRevenue;
 		uint previousMonthProfit;
 		uint profitMargin;	//scaled to 10^18
-		uint denominator;
 		uint i;
 
 		//Calculate the revenue during this month, skipping the current3day because it is not completed yet.
@@ -462,7 +459,7 @@ contract Multiverse is ReentrancyGuard
 		universe[u].query[query].tip += amount;
 	}
 	
-	function report(uint _universe, uint query, uint report) public
+	function report(uint _universe, uint query, uint _report) public
 	{	//Report an outcome
 		require(universe[_universe].repAddress != address(0),		"Error: The universe you provided does not exist");
 		//all txs are forwarded to the heir. Heir is self until fork, afterwards txs are forwarded to winners of the forking games.
@@ -489,8 +486,8 @@ contract Multiverse is ReentrancyGuard
 		uint totalStake			= universe[u].query[query].totalStake;
 		uint thisStake			= universe[u].query[query].nextStake;
 		uint forkBond			= (FORKTHRESHOLD * rep.totalSupply()) / TOKENS;	//Both are scaled by 10^18 so they must be divided by 10^18 after multiplying to retain scale.
-		require(report != lastReport, 		"Error: You must report an outcome different than the last reporter");
-		require(report < numberOfOutcomes, 	"Error: Your report is not one of the outcome choices for this Query");
+		require(_report != lastReport, 		"Error: You must report an outcome different than the last reporter");
+		require(_report < numberOfOutcomes, 	"Error: Your report is not one of the outcome choices for this Query");
 		//Determine the required stake
 		if (lastStake == 0)
 		{	//if no one has reported yet, the initial reporting bond is the same as the query fee paid for this query.
@@ -509,7 +506,7 @@ contract Multiverse is ReentrancyGuard
 		//transfer requiredStake from message sender to this contract
 		rep.transferFrom(msg.sender, address(this), requiredStake);
 		//update variables
-		lastReport 				= report;
+		lastReport 				= _report;
 		lastStake			 	= requiredStake;
 		totalStake			   += requiredStake;
 		//Save the variables
@@ -520,7 +517,7 @@ contract Multiverse is ReentrancyGuard
 		universe[u].query[query].timeOfLastReport		= currentTime;
 		universe[u].query[query].stake.push();			//create storage slot for this stake
 		universe[u].query[query].stake[thisStake].owner	= msg.sender;
-		universe[u].query[query].stake[thisStake].claim	= report;
+		universe[u].query[query].stake[thisStake].claim	= _report;
 		universe[u].query[query].stake[thisStake].amount= requiredStake;
 		universe[u].query[query].stake[thisStake].time	= currentTime;
 		//If this report triggered a fork 
@@ -572,19 +569,15 @@ contract Multiverse is ReentrancyGuard
 		//if the query has no createTime, it means there was a fork and this query still needs to be imported from parent.
 		if (universe[u].query[query].createTime == 0)	importQuery(u, query); 
 		//Set shorter variables for readability:
-		uint supplyOfThisFork;
 		uint thisChild; 	
 		uint ancestor;			
 		uint currentTime			= block.timestamp;
 		uint oneDayAgo	 			= currentTime - ONEDAY;
 		uint threeDaysAgo			= currentTime - 3 * ONEDAY;
-		uint current3day			= _current3day();
 		uint forkState 				= universe[u].forkState;
 		uint forkQuery 				= universe[u].forkQuery;
-		uint parent					= universe[u].parent;
 		uint favoriteChild			= universe[u].favoriteChild;
 		uint totalFeeHoldings		= universe[u].totalFeeHoldings;
-		uint tip					= universe[u].query[query].tip;
 		uint createTime				= universe[u].query[query].createTime;
 		uint outcome				= universe[u].query[query].outcome;
 		uint numberOfOutcomes		= universe[u].query[query].numberOfOutcomes;
@@ -701,7 +694,7 @@ contract Multiverse is ReentrancyGuard
 		//	this loop is unbounded but the required stake is fee*2^nextStake < forkBond, so 20 loops starts to become implausible
 		//	a first correct will always be found because the "if (forkState==0)" earlier rules out normal market with no report by setting stake[0]
 		//	,and because its impossible to get to a fork without staking on an outcome.
-		for (uint i=0; i<nextStake ; i++)
+		for (i=0; i<nextStake ; i++)
 		{
 			if (stake[i].claim==outcome && firstCorrect==NOT_FOUND)	firstCorrect = i;
 			if (stake[i].claim==outcome) 							totalCorrect+= stake[i].amount;
@@ -793,9 +786,7 @@ contract Multiverse is ReentrancyGuard
 		uint state3endTime				= forkStartTime + 21 * ONEDAY;		//forkState 3 and auction[3] end 21 days after the fork starts
 		uint state4endTime				= forkStartTime + 26 * ONEDAY;		//forkState 4 and auction[4] end 26 days after the fork starts
 		uint state5endTime				= forkStartTime + 28 * ONEDAY;		//forkState 5 and auction[5] end 28 days after the fork starts
-		uint nextBid					= universe[u].auction[forkState].nextBid;
 		uint bestBid					= universe[u].auction[forkState].bestBid;
-		uint worstBid					= universe[u].auction[forkState].worstBid;
 		uint mintAmount					= universe[u].auction[forkState].mintAmount;
 		uint totalRepInBids				= universe[u].auction[forkState].totalRepInBids;
 		Bid[] storage bid 				= universe[u].auction[forkState].bid; //turn bid[] into an alias (changes will impact state)
@@ -889,7 +880,7 @@ contract Multiverse is ReentrancyGuard
 		universe[u].forkState								= forkState+1;
 	}
 
-	function bid(uint repAmount, uint adjacentBetterBid, uint destination) payable public
+	function createBid(uint repAmount, uint adjacentBetterBid, uint destination) payable public
 	{	//Place a bid to buy an amount of minted REP payable with ETH as well as declaring where in the order book the bid should be inserted and a destination universe to migrate to.
 		require(universe[destination].repAddress != address(0),	"Error: The universe you provided does not exist");
 		//Shorten variables:
@@ -963,8 +954,8 @@ contract Multiverse is ReentrancyGuard
 		universe[parent].auction[thisAuction].worstBid			= worstBid;				
 	}
 
-	function checkIfBiddingAllowed(uint u) private
-	{	//Checks if bidding is allowed currently. Only used by bid()									
+	function checkIfBiddingAllowed(uint u) private view
+	{	//Checks if bidding is allowed currently. Only used by createBid()									
 		uint currentTime		= block.timestamp;
 		uint forkState			= universe[u].forkState;
 		uint forkQuery			= universe[u].forkQuery;
@@ -982,13 +973,12 @@ contract Multiverse is ReentrancyGuard
 		require(forkState<6,									"Error: The auctions have ended");	
 	}
 
-
 	function collect(uint _universe) public
 	{	//Transfer REP won in the auction to your wallet
-		uint totalSurplus;			// The total quantity of ETH that would be returned to winning bidders if the auction settled using the lower VCG price
-		uint totalRaised;			// The total quantity of ETH that would be raised if the auction settled using the VCG price.
-		uint totalRaisedSellingHalf;	// The total quantity of ETH that would be raised if the auction settled using the VCG price and half as much supply was sold.			
-		uint totalSurplusSellingHalf;// The total quantity of ETH that would be returned to winning bidders if the auction settled using the lower VCG price and half as much supply was sold.
+		//uint totalSurplus;			// The total quantity of ETH that would be returned to winning bidders if the auction settled using the lower VCG price
+		//uint totalRaised;			// The total quantity of ETH that would be raised if the auction settled using the VCG price.
+		//uint totalRaisedSellingHalf;	// The total quantity of ETH that would be raised if the auction settled using the VCG price and half as much supply was sold.			
+		//uint totalSurplusSellingHalf;// The total quantity of ETH that would be returned to winning bidders if the auction settled using the lower VCG price and half as much supply was sold.
 	}
 
 	function createQueryTokenizer(uint _universe) private returns (address tokenizerAddress)
@@ -1029,15 +1019,15 @@ add event logging emit
 deploy to testnet
 */
 
-	function _current3day() public returns (uint current3day)
+	function _current3day() private view returns (uint current3day)
 	{	//Calculate the current 3day; the bucket that new revenue would be logged in
 		//	due to the 60 days of fake revenue added when the multiverse is created, index 0 through 19 starts filled
 		//	at the start of the protocol, the current3day is 20 for the first THREEDAYS.
 		//	uint will always round down, which is desired here because increments happen at the end of a THREEDAYS period.
-		uint current3day = 20 + (block.timestamp - universe[0].query[0].createTime) / THREEDAYS;
+		current3day = 20 + (block.timestamp - universe[0].query[0].createTime) / THREEDAYS;
 	}
 
-	function max(uint a, uint b) public pure returns (uint) 
+	function max(uint a, uint b) private pure returns (uint) 
 	{	//Returns the max of a and b
 		return a > b ? a : b;
 	}
