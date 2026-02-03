@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity ^0.8.33;
 import {ERC20mb} from "./ERC20mb.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
@@ -105,6 +106,7 @@ contract Multiverse is ReentrancyGuard
 		universe[0].repAddress 			= REPV2_ADDRESS;	//set the first universe REP address to the address of REP V2
 		universe[0].queryTokenizer 		= createQueryTokenizer(0);	//create the query tokenizer for universe 0 and store the resulting address
 		universe[0].baseFee 			= 10*TOKENS;		//start the baseFee at 10 REP
+		universe[0].parent				= NOT_FOUND;		//Used by createREP to know when to stop looping through forking history.
 		universe[0].timeFeeLastChanged 	= block.timestamp;	//set the last fee change to now, this gives one month after deployment before the fee changes again.
 		universe[0].nextQuery 			= 1; 				//starting at 1 avoids negative numbers in the code and enables query[0] to log the creation time of the multiverse.
 		universe[0].query.push();							//create a new query. It will receive ID 0.
@@ -986,23 +988,47 @@ contract Multiverse is ReentrancyGuard
 		
 	}
 
-	function createREP(uint _universe) private returns (address repAddress)
-	{	//Deploy a REP token for a _universe
-		// be sure to include "is ERC20, ERC20mb"
-		//ERC20mb rep = new ERC20mb(address(this), "Reputation", "###put token ticker here");  // Multiverse is owner, set name/symbol
-		//repAddress = address(rep);
+	function createREP(uint _universe) public returns (address repAddress)
+	{	//Deploy a REP token for a _universe  ###set to public for testing, change back to private
+		require(_universe<universe.length,	"Error: The universe you provided does not exist");
+		//require(universe[_universe].repAddress == address(0),	"Error: The universe you provided already has a REP address");   reconsider requires after testing
+		uint ticker;
+		uint thisUniverse				= _universe;
+		uint parent 					= universe[_universe].parent;
+		uint forkQuery					= universe[parent].forkQuery;
+		string memory tokenName 		= "Reputation";
+		string memory tickerNumbers;
+		//To determine the ticker, we create a string of outcome numbers required to go from universe 0 to the user provided universe
+		while (thisUniverse!=0)	//do the below steps until arriving at universe 0
+		{	//first convert to a string and save the outcome number associated with this universe by appending to the start of tickerNumbers
+			//	the outcome id associated with a child universe is always the same as the difference between the parent and child universe ids minus 1.
+			tickerNumbers = string.concat(strings.toString(thisUniverse - universe[thisUniverse].parent - 1), tickerNumbers);
+			//then add a period between numbers. checking if the loop is about to end is how we know we are between numbers
+			if (universe[thisUniverse].parent != 0)	tickerNumbers = string.concat(".",tickerNumbers);
+			thisUniverse = universe[thisUniverse].parent;						//then switch to checking the parent of this this universe
+		}	
+		ticker 		= string.concat("REP", tickerNumbers); 	//For example, if getting to this universe required 3 forks, outcome 1, 4, then 0, then the ticker would be REP1.4.0
+										//perhaps instead periods should only be added before two digit outcome numbers, REP140 seems ok.
+		ERC20mb rep = new ERC20mb(address(this),tokenName,ticker);		//deploy the REP token with this contract address having the power to mint
+		address repAddress = address(rep);	//import this new REP token so functions like mint can be called.
+		if (_universe == 0) 	// ### this if statement is added for testing. delete.
+		{
+			rep.mint(msg.sender, 11000000 * TOKENS);
+			universe[0].repAddress = repAddress;
+		}
 	}
 
 
 
 /*
 		TODO
+Outcome id is equal to child id minus parent id MINUS ONE. However, outcome number which counts starting at 1 is simply child id minus parent id. Check for mistakes related to this.
+Add memory to variables to reduce gas
 Consider getting rid of nextQuery variable and instead using query.length
 Consider checking if universes exist using universe.length instead of erc20 exists.
 Find a way to skip auctions if >2/3 of original supply has migrated to a fork. Restoring supply at this point is only harmful.
 Double check that reporter pay got subtracted out of the bonds that will later be transferred when settling the escalation game.
 Consider if advanceForkState() can be made to cover more forkstates, by forwarding to existing functions
-Add memory to variables to reduce gas
 Add the contract that enables premature queries.
 Some for loops can be switched to while loops which is more fitting.
 Switch from burning by transferring to address 0 to rep.burn(amount) now that ERC20mb.sol is included. This will ensure totalSupply() is correct.
