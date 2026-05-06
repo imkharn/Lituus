@@ -37,6 +37,8 @@ Update code to use staked REP instead of normal REP. To accomodate sharing a REP
 Update code to handle splitting with zoltar, minting becomes virtual. The accounting is the same but zoltar.fork() will split all littus REP.
 	zoltar.createQuestion(QuestionData memory questionData, string[] calldata outcomeOptions) external returns (uint256)
 	zoltar.forkUniverse(uint248 universeId, uint256 questionId)
+	zoltar.addRepToMigrationBalance(uint248 universeId, uint256 amount);
+	zoltar.splitMigrationRep(uint248 universeId, uint256 amount, uint256[] memory outcomeIndexes);
 	when switching to staked REP accounting, ensure that both Zoltar forking before Lituus forks and the opposite order function correctly.
 Outcome id is equal to child id minus parent id MINUS ONE. However, outcome number which counts starting at 1 is simply child id minus parent id. Check for mistakes related to this.
 Add memory to variables to reduce gas
